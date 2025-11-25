@@ -4,6 +4,7 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as s3n from "aws-cdk-lib/aws-s3-notifications";
 import * as events from "aws-cdk-lib/aws-lambda-event-sources";
+import * as source from "aws-cdk-lib/aws-lambda-event-sources";
 import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
@@ -29,6 +30,7 @@ export class EDAAppStack extends cdk.Stack {
       partitionKey: { name: "name", type: dynamodb.AttributeType.STRING },
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       tableName: "Imagess",
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
     });
 
     // Integration infrastructure
@@ -43,10 +45,6 @@ export class EDAAppStack extends cdk.Stack {
         queue: dlq,
         maxReceiveCount: 1
       }
-    });
-
-    const mailerQ = new sqs.Queue(this, "mailer-q", {
-      receiveMessageWaitTime: cdk.Duration.seconds(10),
     });
 
 
@@ -136,25 +134,6 @@ export class EDAAppStack extends cdk.Stack {
     );
 
     newImageTopic.addSubscription(
-      new subs.SqsSubscription(mailerQ, {
-        filterPolicyWithMessageBody: {
-          Records: sns.FilterOrPolicy.policy({
-            s3: sns.FilterOrPolicy.policy({
-              object: sns.FilterOrPolicy.policy({
-                key: sns.FilterOrPolicy.filter(
-                  sns.SubscriptionFilter.stringFilter({
-                    matchPrefixes: ["image"],
-                  })
-                ),
-              }),
-            }),
-          }),
-        },
-        rawMessageDelivery: true,
-      })
-    );
-
-    newImageTopic.addSubscription(
       new subs.LambdaSubscription(addMetadataFn, {
         filterPolicy: {
           metadata_type: sns.SubscriptionFilter.stringFilter({
@@ -178,12 +157,11 @@ export class EDAAppStack extends cdk.Stack {
 
     processImageFn.addEventSource(newImageEventSource);
 
-    const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
-      batchSize: 5,
-      maxBatchingWindow: cdk.Duration.seconds(5),
-    });
-
-    mailerFn.addEventSource(newImageMailEventSource);
+    mailerFn.addEventSource(
+      new source.DynamoEventSource(imagesTable, {
+        startingPosition: lambda.StartingPosition.LATEST,
+      })
+    );
 
     const rejectedImageEventSource = new events.SqsEventSource(dlq, {
       batchSize: 5,
